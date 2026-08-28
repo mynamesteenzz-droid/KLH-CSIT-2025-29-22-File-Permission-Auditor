@@ -33,5 +33,5 @@ It provides a practical understanding of how operating systems control access to
 Clone the project repository:
 
 ```bash
-git clone <[repository-url](https://github.com/mynamesteenzz-droid/KLH-CSIT-2025-29-22-File-Permission-Auditor)>
+git clone <https://github.com/mynamesteenzz-droid/KLH-CSIT-2025-29-22-File-Permission-Auditor>
 cd File-Permission-Auditor
