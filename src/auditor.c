@@ -1,4 +1,3 @@
-  GNU nano 7.2                                                                                                                                                                                                                                                                                                                                                        auditor.c *
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
@@ -14,8 +13,6 @@
 typedef struct {
     char *path;
     mode_t mode;
-    uid_t uid;
-    gid_t gid;
     int selectable;
 } ScanEntry;
 
@@ -44,13 +41,12 @@ static int add_entry(const char *path, const struct stat *st) {
         size_t next = entry_capacity ? entry_capacity * 2 : 64;
         ScanEntry *grown = realloc(entries, next * sizeof(*entries));
         if (!grown) { fprintf(stderr, "Cannot store scan results: %s\n", strerror(errno)); scan_had_errors = 1; return -1; }
-        entries = grown; entry_capacity = next;
+        entries = grown;
+        entry_capacity = next;
     }
     entries[entry_count].path = strdup(path);
     if (!entries[entry_count].path) { fprintf(stderr, "Cannot store scan path: %s\n", strerror(errno)); scan_had_errors = 1; return -1; }
     entries[entry_count].mode = st->st_mode;
-    entries[entry_count].uid = st->st_uid;
-    entries[entry_count].gid = st->st_gid;
     entries[entry_count].selectable = !S_ISLNK(st->st_mode);
     entry_count++;
     return 0;
@@ -63,17 +59,17 @@ static const char *entry_type(mode_t mode) {
     return "Other";
 }
 
-static void print_entry(const char *path, mode_t mode, uid_t uid, gid_t gid) {
+static void print_entry(const char *path, mode_t mode) {
     char perms[10];
     permission_string(mode, perms);
     puts("\n--------------------------------------------");
-    printf("Path       : %s\nType       : %s\nPermission : %s\nRisk       : %s\nOwner UID  : %lu\nGroup GID  : %lu\n",
-           path, entry_type(mode), perms, risk_level(mode), (unsigned long)uid, (unsigned long)gid);
+    printf("Path       : %s\nType       : %s\nPermission : %s\nRisk       : %s\n",
+           path, entry_type(mode), perms, risk_level(mode));
     puts("--------------------------------------------");
 }
 
 static void record_entry(const char *path, const struct stat *st) {
-    print_entry(path, st->st_mode, st->st_uid, st->st_gid);
+    print_entry(path, st->st_mode);
     total_count++;
     if (st->st_mode & S_IWOTH) critical_count++;
     else if (st->st_mode & S_IWGRP) warning_count++;
@@ -104,7 +100,9 @@ static void scan_directory(const char *path) {
 
 static void free_entries(void) {
     for (size_t i = 0; i < entry_count; i++) free(entries[i].path);
-    free(entries); entries = NULL; entry_count = entry_capacity = 0;
+    free(entries);
+    entries = NULL;
+    entry_count = entry_capacity = 0;
 }
 
 static int read_line(const char *prompt, char *buf, size_t size) {
@@ -329,6 +327,7 @@ static int get_valid_directory(void) {
         return 1;
     }
 }
+
 static void scan_selected_directory(void) {
     free_entries(); total_count = safe_count = warning_count = critical_count = 0; scan_had_errors = 0; scan_performed = 1;
     puts("\n--------------------------------------------\n              DIRECTORY SCAN\n--------------------------------------------");
@@ -364,10 +363,42 @@ static void filter_results(void) {
         if (choice == 2 && strcmp(risk, "SAFE") != 0) continue;
         if (choice == 3 && strcmp(risk, "WARNING") != 0) continue;
         if (choice == 4 && strcmp(risk, "CRITICAL") != 0) continue;
-        print_entry(entries[i].path, entries[i].mode, entries[i].uid, entries[i].gid);
+        print_entry(entries[i].path, entries[i].mode);
         shown++;
     }
     printf("\nEntries shown: %zu\n", shown);
+}
+
+static void get_audit_log_path(char output[PATH_MAX]) {
+    char executable[PATH_MAX];
+    ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+    if (length < 0) {
+        snprintf(output, PATH_MAX, "audit.log");
+        return;
+    }
+    executable[length] = '\0';
+    char *slash = strrchr(executable, '/');
+    if (!slash) {
+        snprintf(output, PATH_MAX, "audit.log");
+        return;
+    }
+    if (slash == executable) slash[1] = '\0';
+    else *slash = '\0';
+    int written = snprintf(output, PATH_MAX, "%s/audit.log", executable);
+    if (written < 0 || written >= PATH_MAX) snprintf(output, PATH_MAX, "audit.log");
+}
+
+static void format_change_time(const struct timespec *when, char output[128]) {
+    struct tm local_tm, utc_tm;
+    char local_date[32] = "unknown", zone[16] = "", utc_date[32] = "unknown";
+    if (localtime_r(&when->tv_sec, &local_tm)) {
+        strftime(local_date, sizeof(local_date), "%Y-%m-%dT%H:%M:%S", &local_tm);
+        strftime(zone, sizeof(zone), "%z", &local_tm);
+    }
+    if (gmtime_r(&when->tv_sec, &utc_tm))
+        strftime(utc_date, sizeof(utc_date), "%Y-%m-%dT%H:%M:%S", &utc_tm);
+    snprintf(output, 128, "%s.%09ld %s (UTC %s.%09ldZ)", local_date,
+             when->tv_nsec, zone, utc_date, when->tv_nsec);
 }
 
 static void fix_permission(void) {
@@ -377,8 +408,8 @@ static void fix_permission(void) {
     for (size_t i = 0; i < entry_count; i++) {
         if (!entries[i].selectable) continue;
         char p[10]; permission_string(entries[i].mode, p);
-            printf("%zu. %s (%s, %s, UID %lu, GID %lu)\n", ++shown, entries[i].path, p,
-               entry_type(entries[i].mode), (unsigned long)entries[i].uid, (unsigned long)entries[i].gid);
+        printf("%zu. %s (%s, %s)\n", ++shown, entries[i].path, p,
+               entry_type(entries[i].mode));
     }
     if (!shown) { puts("No eligible entries."); return; }
     char input[128]; char *end; errno = 0;
@@ -400,25 +431,35 @@ static void fix_permission(void) {
     if (errno || end == input || *end || c < 1 || c > 7) { puts("Invalid choice."); return; }
     mode_t desired = modes[c];
     if (chmod(path, desired) != 0) { printf("Permission change failed.\nReason: %s\n", strerror(errno)); return; }
+    struct timespec changed_at;
+    if (clock_gettime(CLOCK_REALTIME, &changed_at) != 0) {
+        changed_at.tv_sec = time(NULL);
+        changed_at.tv_nsec = 0;
+    }
     if (lstat(path, &st) != 0) { printf("Permission changed, but reread failed.\nReason: %s\n", strerror(errno)); return; }
     permission_string(st.st_mode, newp);
     if ((st.st_mode & 07777) != desired) { printf("Permission change did not produce requested mode.\nOld permission : %s\nObserved permission : %s\n", oldp, newp); return; }
-    FILE *log = fopen("audit.log", "a");
-    if (!log) { printf("Permission changed successfully, but audit.log could not be written: %s\n", strerror(errno)); }
+    char log_path[PATH_MAX], timestamp[128];
+    get_audit_log_path(log_path);
+    format_change_time(&changed_at, timestamp);
+    FILE *log = fopen(log_path, "a");
+    if (!log) { printf("Permission changed successfully, but audit log could not be written to %s: %s\n", log_path, strerror(errno)); }
     else {
-        time_t now = time(NULL); struct tm tm; char timestamp[64] = "unknown";
-        if (localtime_r(&now, &tm)) strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S %z", &tm);
-        fprintf(log, "File: %s | Old: %s | New: %s | Time: %s\n", path, oldp, newp, timestamp);
-        if (fclose(log) != 0) printf("Audit log write failed: %s\n", strerror(errno));
+        int write_error = fprintf(log, "File: %s | Old: %s | New: %s | Time: %s\n", path, oldp, newp, timestamp) < 0;
+        if (fclose(log) != 0) write_error = 1;
+        if (write_error) printf("Audit log write failed for %s.\n", log_path);
     }
     puts("\n============================================\n       PERMISSION CHANGED SUCCESSFULLY\n============================================");
-    printf("Path           : %s\nOld permission : %s\nNew permission : %s\n============================================\n", path, oldp, newp);
+    printf("Path           : %s\nOld permission : %s\nNew permission : %s\nAudit log      : %s\n============================================\n", path, oldp, newp, log_path);
 }
 
 static void view_audit_log(void) {
-    FILE *f = fopen("audit.log", "r");
-    if (!f) { if (errno == ENOENT) puts("No audit log found."); else printf("Cannot open audit.log: %s\n", strerror(errno)); return; }
+    char log_path[PATH_MAX];
+    get_audit_log_path(log_path);
+    FILE *f = fopen(log_path, "r");
+    if (!f) { if (errno == ENOENT) puts("No audit log found."); else printf("Cannot open %s: %s\n", log_path, strerror(errno)); return; }
     puts("\n============================================\n                AUDIT LOG\n============================================");
+    printf("Log file: %s\n", log_path);
     char line[4096]; while (fgets(line, sizeof(line), f)) fputs(line, stdout);
     if (ferror(f)) printf("Error reading audit.log: %s\n", strerror(errno));
     fclose(f);
