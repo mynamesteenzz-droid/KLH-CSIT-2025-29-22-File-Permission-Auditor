@@ -3,6 +3,7 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 #include <errno.h>
 
@@ -396,11 +397,12 @@ void prepare_path(char *input)
 }
 
 
-/* Ask for a valid directory */
+/* Ask for a valid and accessible directory */
 void get_valid_directory()
 {
     char input[1024];
     struct stat st;
+    DIR *directory;
 
     while (1)
     {
@@ -417,6 +419,7 @@ void get_valid_directory()
 
         prepare_path(input);
 
+        /* Check whether the path exists */
         if (lstat(scan_path, &st) != 0)
         {
             printf("\n============================================\n");
@@ -431,6 +434,7 @@ void get_valid_directory()
             continue;
         }
 
+        /* Check whether the path is actually a directory */
         if (!S_ISDIR(st.st_mode))
         {
             printf("\n============================================\n");
@@ -444,7 +448,31 @@ void get_valid_directory()
             continue;
         }
 
-        printf("\nDirectory found successfully.\n");
+        /*
+         * Important:
+         * A directory may exist but still be inaccessible.
+         * Try opening it before accepting the path.
+         */
+        directory = opendir(scan_path);
+
+        if (directory == NULL)
+        {
+            printf("\n============================================\n");
+            printf("                  ERROR\n");
+            printf("============================================\n");
+            printf("Directory exists but cannot be accessed.\n");
+            printf("Reason: %s\n", strerror(errno));
+            printf("Path    : %s\n", scan_path);
+            printf("\nPlease enter a directory you have permission to access.\n");
+            printf("For Codespaces, you can enter: .\n");
+            printf("============================================\n");
+
+            continue;
+        }
+
+        closedir(directory);
+
+        printf("\nDirectory found and accessible.\n");
         printf("Using directory: %s\n", scan_path);
 
         break;
