@@ -1,0 +1,322 @@
+  GNU nano 7.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              auditor.c.save
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <errno.h>
+
+int total_files = 0;
+int safe_files = 0;
+int warning_files = 0;
+int critical_files = 0;
+
+char scan_path[1024] = "";
+
+void permission_string(mode_t mode, char *p)
+{
+    p[0] = (mode & S_IRUSR) ? 'r' : '-';
+    p[1] = (mode & S_IWUSR) ? 'w' : '-';
+    p[2] = (mode & S_IXUSR) ? 'x' : '-';
+
+    p[3] = (mode & S_IRGRP) ? 'r' : '-';
+    p[4] = (mode & S_IWGRP) ? 'w' : '-';
+    p[5] = (mode & S_IXGRP) ? 'x' : '-';
+
+    p[6] = (mode & S_IROTH) ? 'r' : '-';
+    p[7] = (mode & S_IWOTH) ? 'w' : '-';
+    p[8] = (mode & S_IXOTH) ? 'x' : '-';
+
+    p[9] = '\0';
+}
+
+const char *risk_level(mode_t mode)
+{
+    if (mode & S_IWOTH)
+        return "CRITICAL";
+
+    if (mode & S_IWGRP)
+        return "WARNING";
+
+    return "SAFE";
+}
+
+void check_file(const char *path)
+{
+    struct stat st;
+    char permission[10];
+
+    if (lstat(path, &st) != 0)
+    {
+        printf("Cannot check: %s\n", path);
+        return;
+    }
+
+    permission_string(st.st_mode, permission);
+
+    total_files++;
+
+    printf("\nFile       : %s\n", path);
+    printf("Permission : %s\n", permission);
+
+    if (strcmp(risk_level(st.st_mode), "CRITICAL") == 0)
+    {
+        printf("Risk       : CRITICAL\n");
+        critical_files++;
+    }
+    else if (strcmp(risk_level(st.st_mode), "WARNING") == 0)
+    {
+        printf("Risk       : WARNING\n");
+        warning_files++;
+    }
+    else
+    {
+        printf("Risk       : SAFE\n");
+        safe_files++;
+    }
+}
+
+void scan_directory(const char *path)
+{
+    DIR *directory;
+    struct dirent *entry;
+    struct stat st;
+    char full_path[2048];
+
+    directory = opendir(path);
+
+    if (directory == NULL)
+    {
+        printf("Cannot open directory: %s\n", path);
+        printf("Reason: %s\n", strerror(errno));
+        return;
+    }
+
+    while ((entry = readdir(directory)) != NULL)
+    {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        snprintf(full_path, sizeof(full_path),
+                 "%s/%s", path, entry->d_name);
+
+        if (lstat(full_path, &st) != 0)
+            continue;
+
+        if (S_ISDIR(st.st_mode))
+        {
+            scan_directory(full_path);
+        }
+        else
+        {
+            check_file(full_path);
+        }
+    }
+
+    closedir(directory);
+}
+
+void scan_selected_directory()
+{
+    total_files = 0;
+    safe_files = 0;
+    warning_files = 0;
+    critical_files = 0;
+
+    printf("\n============================================\n");
+    printf("              DIRECTORY SCAN\n");
+    printf("============================================\n");
+
+    printf("Scanning: %s\n", scan_path);
+    printf("--------------------------------------------\n");
+
+    scan_directory(scan_path);
+
+void show_report()
+{
+    printf("\n============================================\n");
+    printf("                SCAN REPORT\n");
+    printf("============================================\n");
+
+    printf("Directory : %s\n", scan_path);
+    printf("Total Files : %d\n", total_files);
+    printf("Safe        : %d\n", safe_files);
+    printf("Warning     : %d\n", warning_files);
+    printf("Critical    : %d\n", critical_files);
+
+    printf("============================================\n");
+}
+
+void fix_permission()
+{
+    char path[1024];
+    struct stat st;
+    char old_permission[10];
+    char new_permission[10];
+    int choice;
+    mode_t new_mode;
+
+    printf("\n============================================\n");
+    printf("            FIX FILE PERMISSION\n");
+    printf("============================================\n");
+
+    printf("Enter full file path: ");
+    scanf("%1023s", path);
+
+    if (lstat(path, &st) != 0)
+    {
+        printf("\nFile not found or cannot be accessed.\n");
+        return;
+    }
+
+    permission_string(st.st_mode, old_permission);
+
+    printf("\nCurrent permission: %s\n", old_permission);
+
+    printf("\nChoose new permission:\n");
+    printf("1. 640  -> Owner: rw-, Group: r--, Other: ---\n");
+    printf("2. 644  -> Owner: rw-, Group: r--, Other: r--\n");
+    printf("3. 750  -> Owner: rwx, Group: r-x, Other: ---\n");
+
+    printf("\nEnter choice: ");
+    scanf("%d", &choice);
+
+    if (choice == 1)
+        new_mode = 0640;
+    else if (choice == 2)
+        new_mode = 0644;
+    else if (choice == 3)
+        new_mode = 0750;
+    else
+    {
+        printf("\nInvalid choice.\n");
+        return;
+    }
+
+    if (chmod(path, new_mode) != 0)
+    {
+        printf("\nPermission change failed.\n");
+        printf("Reason: %s\n", strerror(errno));
+        return;
+    }
+
+    if (lstat(path, &st) != 0)
+    {
+        printf("\nPermission changed, but new permission could not be read.\n");
+        return;
+    }
+
+    permission_string(st.st_mode, new_permission);
+
+    FILE *log = fopen("audit.log", "a");
+
+    if (log != NULL)
+    {
+        time_t now = time(NULL);
+
+        fprintf(log,
+                "File: %s | Old: %s | New: %s | Time: %s",
+                path,
+                old_permission,
+                new_permission,
+                ctime(&now));
+
+        fclose(log);
+    }
+
+    printf("\nPermission changed successfully.\n");
+    printf("Old permission: %s\n", old_permission);
+    printf("New permission: %s\n", new_permission);
+    printf("Change recorded in audit.log\n");
+}
+
+void view_audit_log()
+{
+    FILE *log;
+    char line[2048];
+
+    printf("\n============================================\n");
+    printf("                AUDIT LOG\n");
+    printf("============================================\n");
+
+    log = fopen("audit.log", "r");
+
+    if (log == NULL)
+    {
+        printf("No audit log found.\n");
+        printf("Make a permission change first.\n");
+        printf("============================================\n");
+        return;
+    }
+
+    while (fgets(line, sizeof(line), log) != NULL)
+        printf("%s", line);
+
+    fclose(log);
+
+    printf("============================================\n");
+}
+
+int main()
+{
+    int choice;
+
+    printf("\n============================================\n");
+    printf("          FILE PERMISSION AUDITOR\n");
+    printf("============================================\n");
+
+    printf("\nEnter directory to scan: ");
+    scanf("%1023s", scan_path);
+
+    do
+    {
+        printf("\n\n============================================\n");
+        printf("                  MENU\n");
+        printf("============================================\n");
+        printf("1. Scan Directory\n");
+        printf("2. Fix File Permission\n");
+        printf("3. View Audit Log\n");
+        printf("4. View Scan Report\n");
+        printf("5. Exit\n");
+        printf("============================================\n");
+
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+
+        switch (choice)
+        {
+            case 1:
+                scan_selected_directory();
+                break;
+
+            case 2:
+                fix_permission();
+                break;
+
+            case 3:
+                view_audit_log();
+                break;
+
+            case 4:
+                show_report();
+                break;
+
+            case 5:
+                printf("\nExiting File Permission Auditor...\n");
+                break;
+
+            default:
+                printf("\nInvalid choice. Please try again.\n");
+        }
+
+    } while (choice != 5);
+
+    return 0;
+}
+
+
+
+
+
